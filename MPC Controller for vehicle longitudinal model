@@ -1,0 +1,168 @@
+# Author Ali Qiasi
+# Email: Aliqiasi75@Gmail.com
+#
+# code for MPC Controller with do-mpc package v4.4.0 and casadi v3.5.5
+
+# Imports
+import numpy as np
+import matplotlib.pyplot as plt
+import sys
+from casadi import *
+
+# Import do_mpc package:
+import do_mpc
+
+# Import for ploting
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+
+
+# Lateral Controller#
+#################
+####  Model  ####
+#################
+# Obtain an instance of the do-mpc model class
+# and select time discretization:
+model_type = 'continuous'  # either 'discrete' or 'continuous'
+modellong = do_mpc.model.Model(model_type)
+
+# parametrs
+v_x = 16.667
+tow = 0.5
+Cf = 72653
+Cr = 121449
+m = 1820
+
+
+# Introduce new states, inputs and other variables to the model, e.g.:
+# states
+dx = modellong.set_variable('_x', 'speed')
+ddx = modellong.set_variable('_x', 'accel')
+
+# input
+Ft = modellong.set_variable('_u', 'force')
+
+# Set right-hand-side of ODE for all introduced states (_x).
+# Names are inherited from the state definition.
+# ODE equation
+modellong.set_rhs('speed', ddx)
+modellong.set_rhs('accel', -(ddx / tow) + (Ft / (tow * m)))
+
+# modellat.set_rhs('force', dx) (we dont need this. API dont use 'y' Eq.)
+
+# Build the model
+modellong.setup()
+
+######################
+####  cotnroller  ####
+######################
+# Obtain an instance of the do-mpc MPC class
+# and initiate it with the model:
+mpclong = do_mpc.controller.MPC(modellong)
+
+# Set Parameters
+setup_mpclong = {
+    'n_horizon': 20,
+    'n_robust': 5,
+    't_step': 0.1,
+    'state_discretization': 'collocation',
+    'collocation_type': 'radau',
+    'collocation_deg': 2,
+    'collocation_ni': 2,
+    'store_full_solution': True,
+    # Use MA27 linear solver in ipopt for faster calculations:
+    # 'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}
+}
+mpclong.set_param(**setup_mpclong)
+# Configure objective function:
+_x = modellong.x
+_u = modellong.u
+mtermlong = (_x['speed'] - 20)**2 # terminal cost
+ltermlong = 1000*((_x['speed'] - 20)**2) + 0.001*(_u['force']**2)  # stage cost
+
+mpclong.set_objective(mterm = mtermlong, lterm = ltermlong)
+
+# State and input bounds:
+# lower bound states
+mpclong.bounds['lower', '_x', 'speed'] = -10
+mpclong.bounds['lower', '_x', 'accel'] = -5.0
+
+# upper bound states
+mpclong.bounds['upper', '_x', 'speed'] = 40.0
+mpclong.bounds['upper','_x','accel'] = 5.0
+
+# upper and lower bounds of the control input
+mpclong.bounds['lower', '_u', 'force'] = -12000
+mpclong.bounds['upper', '_u', 'force'] = 12000
+
+mpclong.setup()
+
+
+#################################
+####  estimator & simulator  ####
+#################################
+
+estimatorlong = do_mpc.estimator.StateFeedback(modellong)
+
+# Obtain an instance of the do-mpc simulator class
+# and initiate it with the model:
+simulatorlong = do_mpc.simulator.Simulator(modellong)
+
+# Set parameter(s):
+simulatorlong.set_param(t_step = 0.1)
+
+# Optional: Set function for parameters and time-varying parameters.
+# Setup simulator:
+simulatorlong.setup()
+
+# Initial state
+speed_0 = 1  # Speed of vehicle [m/s]
+accel_0 = 0  # acceleration of vehicle [m/s^2]
+
+x0 = np.array([speed_0, accel_0])
+
+# Set for controller, simulator and estimator
+mpclong.x0 = x0
+simulatorlong.x0 = x0
+estimatorlong.x0 = x0
+mpclong.set_initial_guess()
+
+for k in range(100):
+    u0 = mpclong.make_step(x0)
+    y_next = simulatorlong.make_step(u0)
+    x0 = estimatorlong.make_step(y_next)
+
+
+################
+####  Plot  ####
+################
+
+# Customizing Matplotlib:
+mpl.rcParams['font.size'] = 18
+mpl.rcParams['lines.linewidth'] = 3
+mpl.rcParams['axes.grid'] = True
+
+mpc_graphics = do_mpc.graphics.Graphics(mpclong.data)
+sim_graphics = do_mpc.graphics.Graphics(simulatorlong.data)
+
+# We just want to create the plot and not show it right now. This "inline magic" supresses the output.
+fig, ax = plt.subplots(2, sharex = True, figsize = (16, 9))
+fig.align_ylabels()
+
+for g in [sim_graphics, mpc_graphics]:
+    # Plot the Speed and accelaration of Vehicle (dx, ddx) on the first axis:
+    g.add_line(var_type = '_x', var_name = 'speed', axis = ax[0])
+    g.add_line(var_type = '_x', var_name = 'accel', axis = ax[0])
+
+    # Plot the set force (trothel) on the second axis:
+    g.add_line(var_type = '_u', var_name = 'force', axis = ax[1])
+
+ax[0].set_ylabel('speed and Accel [m/s]')
+ax[1].set_ylabel('focre [m/s^2]')
+ax[1].set_xlabel('time [s]')
+
+sim_graphics.plot_results()
+# Reset the limits on all axes in graphic to show the data.
+sim_graphics.reset_axes()
+# Show the figure:
+plt.show()
